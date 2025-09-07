@@ -4,4 +4,3 @@ venv/
 log/
 update_webhook.py
 staging/
-update_webhook.py
