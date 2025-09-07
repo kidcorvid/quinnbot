@@ -1,5 +1,5 @@
 #!/bin/bash
-# A script to automatically update and restart the Quinn Bot service from Git.
+# A script to automatically update and restart the Quinn Bot service from Git. 
 
 # --- Configuration ---
 BOT_DIR="/home/kidcorvid/quinnbot"
