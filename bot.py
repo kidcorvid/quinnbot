@@ -50,7 +50,7 @@ PROGRAMS = {
     "sugarcraft": {
         "name": "Sugarcraft",
         "description": "Minecraft server",
-        "emoji": "⛏️",
+        "emoji": "⛏",
         "monitor_name": "Sugarcraft",
     },
 }
@@ -79,6 +79,38 @@ def save_settings(settings: Dict):
 
 # Load settings on bot startup.
 server_settings = load_settings()
+
+
+# --- HELPER FUNCTIONS ---
+
+def create_welcome_embed() -> discord.Embed:
+    """Creates and returns the welcome embed message."""
+    welcome_embed = discord.Embed(
+        title="🦅 Welcome to the Quinnternet!",
+        description="I'm here to deliver announcements about Quinn's servers.",
+        color=discord.Color.blurple(),
+    )
+    welcome_embed.add_field(
+        name="🔧 How to Set Me Up",
+        value=(
+            "1. An admin needs to run `!quinnbotsetup` in the channel you'd like to receive updates & announcements in.\n"
+            "2. Admins can use `/programs` to select which updates you're interested in.\n"
+            "3. Anyone can use `/status` to check the current status of all programs."
+        ),
+        inline=False,
+    )
+    welcome_embed.add_field(
+        name="Available Servers",
+        value="\n".join(
+            [
+                f"{info['emoji']} **{info['name']}**: {info['description']}"
+                for info in PROGRAMS.values()
+            ]
+        ),
+        inline=False,
+    )
+    welcome_embed.set_footer(text="nya :3")
+    return welcome_embed
 
 
 # --- UPTIME KUMA INTEGRATION ---
@@ -282,31 +314,7 @@ async def on_guild_join(guild: discord.Guild):
     """Event triggered when the bot is added to a new server."""
     print(f"Joined new server: {guild.name} (ID: {guild.id})")
 
-    welcome_embed = discord.Embed(
-        title="🐦‍⬛ Welcome to the Quinnternet!",
-        description="I'm here to deliver announcements about Quinn's servers.",
-        color=discord.Color.blurple(),
-    )
-    welcome_embed.add_field(
-        name="🔧 How to Set Me Up",
-        value=(
-            "1. An admin needs to run `!quinnbotsetup` in the channel you'd like to receive updates & announcements in.\n"
-            "2. Admins can use `/programs` to select which updates you're interested in.\n"
-            "3. Anyone can use `/status` to check the current status of all programs."
-        ),
-        inline=False,
-    )
-    welcome_embed.add_field(
-        name="Available Servers",
-        value="\n".join(
-            [
-                f"{info['emoji']} **{info['name']}**: {info['description']}"
-                for info in PROGRAMS.values()
-            ]
-        ),
-        inline=False,
-    )
-    welcome_embed.set_footer(text="nya :3")
+    welcome_embed = create_welcome_embed()
 
     # Try to send the welcome message to the server's system channel or the first available text channel.
     target_channel = guild.system_channel
@@ -582,6 +590,20 @@ async def on_message(message: discord.Message):
         )
 
         await message.reply(embed=setup_embed)
+        return
+
+    # Check for the start command (available to admins)
+    if message.content.lower() == "!quinnbotstart":
+        # Check if user has manage_channels permission
+        if not message.author.guild_permissions.manage_channels:
+            await message.reply(
+                "❌ You need the 'Manage Channels' permission to use this command."
+            )
+            return
+
+        # Send the welcome message
+        welcome_embed = create_welcome_embed()
+        await message.channel.send(embed=welcome_embed)
         return
 
     # Handle owner-only commands

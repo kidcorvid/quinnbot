@@ -6,6 +6,7 @@ BOT_DIR="/home/kidcorvid/quinnbot"
 SERVICE_NAME="quinnbot"
 LOG_FILE="/home/kidcorvid/quinnbot/log/bot-updates.log"
 VENV_PATH="venv/bin/activate" # Path to virtual environment activation script
+DATE_TODAY=$(date +%Y-%m-%d)
 
 # --- Script Logic ---
 
@@ -14,7 +15,7 @@ set -e
 
 # Function for logging with a timestamp
 log() {
-    echo "[$(date)] $1" >> $LOG_FILE
+    echo "$DATE_TODAY $1" >> $LOG_FILE
 }
 
 log "Starting update process"
