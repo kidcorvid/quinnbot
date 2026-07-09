@@ -185,7 +185,7 @@ async def fetch_uptime_kuma_status() -> Optional[Dict[str, str]]:
                                         status = "online"
                                     elif status_value == 0:
                                         status = "offline"
-                                    elif status_value == 2:
+                                    elif status_value == 3:
                                         status = "maintenance"
                                     else:
                                         status = "offline"
