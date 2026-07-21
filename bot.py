@@ -59,6 +59,20 @@ PROGRAMS = {
 UPTIME_KUMA_URL = os.getenv("UPTIME_KUMA_URL", "")
 UPTIME_KUMA_STATUS_PAGE_SLUG = os.getenv("UPTIME_KUMA_STATUS_PAGE_SLUG", "default")
 
+# Fixed author info shown on every announcement embed.
+ANNOUNCEMENT_AUTHOR_NAME = "kidcorvid"
+ANNOUNCEMENT_AUTHOR_ICON_URL = "https://i.imgur.com/qfgL6Pf.png"
+ANNOUNCEMENT_AUTHOR_URL = "https://bit.ly/quinnflix"
+
+# Status options for the announcement embed footer/color. Label -> embed color (decimal).
+ANNOUNCEMENT_STATUSES = {
+    "Normal": 9762148,
+    "Incident": 16771191,
+    "Info": 3519216,
+    "Offline": 14176331,
+}
+DEFAULT_ANNOUNCEMENT_STATUS = "Normal"
+
 # In-memory cache for program statuses. This is used as a fallback if Uptime Kuma is unreachable.
 cached_program_status: Dict[str, str] = {}
 
@@ -480,14 +494,33 @@ async def programs(ctx: discord.ApplicationContext):
         ),
         discord.Option(
             str,
+            name="title",
+            description='Optional: Custom title (defaults to "Announcement")',
+            required=False,
+        ),
+        discord.Option(
+            str,
             name="program",
-            description="Optional: Announce for a specific program",
+            description="Optional: Announce for a specific program (fills the Server field)",
             choices=list(PROGRAMS.keys()),
+            required=False,
+        ),
+        discord.Option(
+            str,
+            name="status",
+            description="Optional: Status shown in the footer/embed color (defaults to Normal)",
+            choices=list(ANNOUNCEMENT_STATUSES.keys()),
             required=False,
         ),
     ],
 )
-async def announce(ctx: discord.ApplicationContext, message: str, program: str = None):
+async def announce(
+    ctx: discord.ApplicationContext,
+    message: str,
+    title: str = None,
+    program: str = None,
+    status: str = None,
+):
     """Sends an announcement to all servers that have set up an announcement channel."""
     if ctx.author.id != OWNER_ID:
         await ctx.respond("❌ This is a Quinn-only command.", ephemeral=True)
@@ -495,21 +528,25 @@ async def announce(ctx: discord.ApplicationContext, message: str, program: str =
 
     await ctx.defer(ephemeral=True)
 
-    # Create the announcement embed
-    embed_title = "📢 Announcement"
-    if program and program in PROGRAMS:
-        embed_title += f" for {PROGRAMS[program]['name']}"
+    # Resolve title, server name, and status/color for the embed.
+    display_title = f"📢 {title.strip()}" if title and title.strip() else "📢 Announcement"
+    server_name = PROGRAMS[program]["name"] if program and program in PROGRAMS else "Quinnflix"
+    status_label = status if status in ANNOUNCEMENT_STATUSES else DEFAULT_ANNOUNCEMENT_STATUS
 
+    # Create the announcement embed
     announcement_embed = discord.Embed(
-        title=embed_title,
+        title=display_title,
         description=message,
-        color=discord.Color.gold(),
+        color=discord.Colour(ANNOUNCEMENT_STATUSES[status_label]),
         timestamp=datetime.utcnow(),
     )
-    if program and program in PROGRAMS:
-        announcement_embed.set_footer(
-            text=f"{PROGRAMS[program]['emoji']} {PROGRAMS[program]['name']}"
-        )
+    announcement_embed.set_author(
+        name=ANNOUNCEMENT_AUTHOR_NAME,
+        url=ANNOUNCEMENT_AUTHOR_URL,
+        icon_url=ANNOUNCEMENT_AUTHOR_ICON_URL,
+    )
+    announcement_embed.add_field(name="Server:", value=server_name, inline=True)
+    announcement_embed.set_footer(text=f"Status: {status_label}")
 
     sent_count = 0
     failed_count = 0
@@ -605,85 +642,6 @@ async def on_message(message: discord.Message):
         welcome_embed = create_welcome_embed()
         await message.channel.send(embed=welcome_embed)
         return
-
-    # Handle owner-only commands
-    if message.author.id != OWNER_ID or not message.content.startswith("!"):
-        return
-
-    # We don't need bot.process_commands because we are handling it manually.
-    # This avoids conflicts with a potential commands.Bot instance.
-
-    parts = message.content.split(" ", 2)
-    command = parts[0][1:].lower()  # e.g., "!announce" -> "announce"
-
-    if command == "announce":
-        # Corrected logic for text-based announcements
-        if len(parts) < 2:
-            await message.reply(
-                "Usage: `!announce <message>` or `!announce <program_id> <message>`"
-            )
-            return
-
-        program_id = None
-        announce_message = ""
-
-        # Check if the first argument is a valid program ID
-        if len(parts) > 2 and parts[1].lower() in PROGRAMS:
-            program_id = parts[1].lower()
-            announce_message = parts[2]
-        else:
-            announce_message = message.content[
-                len(command) + 2 :
-            ]  # The rest of the message
-
-        # Create embed
-        embed_title = "📢 Announcement"
-        if program_id:
-            embed_title += f" for {PROGRAMS[program_id]['name']}"
-
-        embed = discord.Embed(
-            title=embed_title,
-            description=announce_message,
-            color=discord.Color.gold(),
-            timestamp=datetime.utcnow(),
-        )
-        if program_id:
-            embed.set_footer(
-                text=f"{PROGRAMS[program_id]['emoji']} {PROGRAMS[program_id]['name']}"
-            )
-
-        # Send to all configured servers
-        sent_count = 0
-        failed_count = 0
-
-        for guild_id, settings in server_settings.items():
-            if "channel" not in settings:
-                continue
-
-            # If a program is specified, check subscription
-            if program_id:
-                prefs = settings.get("programs", list(PROGRAMS.keys()))
-                if program_id not in prefs:
-                    continue
-
-            try:
-                guild = bot.get_guild(int(guild_id))
-                if not guild:
-                    continue
-
-                channel = guild.get_channel(settings["channel"])
-                if channel and channel.permissions_for(guild.me).send_messages:
-                    await channel.send(embed=embed)
-                    sent_count += 1
-                else:
-                    failed_count += 1
-            except Exception as e:
-                print(f"Failed to send text announcement to guild {guild_id}: {e}")
-                failed_count += 1
-
-        await message.reply(
-            f"✅ Announcement sent to {sent_count} servers. ({failed_count} failures.)"
-        )
 
 
 # --- RUN THE BOT ---
