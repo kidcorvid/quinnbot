@@ -55,6 +55,11 @@ PROGRAMS = {
     },
 }
 
+# Programs a server is enrolled in by default, before it has ever touched
+# /programs. Every server running this bot has Quinnflix, so it's on by
+# default; everything else is explicit opt-in.
+DEFAULT_ENROLLED_PROGRAMS = ["quinnflix"]
+
 # Uptime Kuma configuration from environment variables.
 UPTIME_KUMA_URL = os.getenv("UPTIME_KUMA_URL", "")
 UPTIME_KUMA_STATUS_PAGE_SLUG = os.getenv("UPTIME_KUMA_STATUS_PAGE_SLUG", "default")
@@ -89,6 +94,24 @@ def save_settings(settings: Dict):
     """Saves the current server settings to the JSON file."""
     with open(SETTINGS_FILE, "w") as f:
         json.dump(settings, f, indent=4)
+
+
+def ensure_default_program_preferences(guild_id: str) -> None:
+    """Gives a server explicit program preferences the first time it's set up.
+
+    Every server running this bot has Quinnflix, so a server that hasn't
+    customized its preferences yet is explicitly enrolled in Quinnflix only
+    (everything else stays opt-in via /programs). This is written explicitly
+    rather than left as an implicit default so /programs shows the correct
+    toggle state and people can still opt out of Quinnflix themselves.
+
+    Does nothing if the server already has explicit preferences saved (so it
+    never overrides someone's own /programs choices, including opting out of
+    Quinnflix).
+    """
+    settings = server_settings.setdefault(guild_id, {})
+    if "programs" not in settings:
+        settings["programs"] = list(DEFAULT_ENROLLED_PROGRAMS)
 
 
 # Load settings on bot startup.
@@ -248,9 +271,9 @@ class ProgramSelectView(discord.ui.View):
         super().__init__(timeout=300)  # View times out after 5 minutes of inactivity
         self.guild_id = str(guild_id)
 
-        # Get the server's current preferences, defaulting to all programs if not set.
+        # Get the server's current preferences, defaulting to Quinnflix only if not set.
         current_prefs = server_settings.get(self.guild_id, {}).get(
-            "programs", list(PROGRAMS.keys())
+            "programs", list(DEFAULT_ENROLLED_PROGRAMS)
         )
 
         # Dynamically create a button for each program
@@ -283,10 +306,10 @@ class ProgramSelectView(discord.ui.View):
 
         # Ensure the server has an entry in the settings
         if self.guild_id not in server_settings:
-            server_settings[self.guild_id] = {"programs": list(PROGRAMS.keys())}
+            server_settings[self.guild_id] = {"programs": list(DEFAULT_ENROLLED_PROGRAMS)}
 
         current_prefs = server_settings[self.guild_id].get(
-            "programs", list(PROGRAMS.keys())
+            "programs", list(DEFAULT_ENROLLED_PROGRAMS)
         )
 
         # Toggle the preference
@@ -453,6 +476,7 @@ async def setup(
         server_settings[guild_id] = {}
 
     server_settings[guild_id]["channel"] = channel.id
+    ensure_default_program_preferences(guild_id)
     save_settings(server_settings)
 
     await ctx.respond(
@@ -528,9 +552,12 @@ async def announce(
 
     await ctx.defer(ephemeral=True)
 
-    # Resolve title, server name, and status/color for the embed.
+    # Resolve title, target program, server name, and status/color for the embed.
+    # An unspecified program defaults to Quinnflix (every server has it), so
+    # subscription filtering below is always evaluated against a real program.
+    target_program = program if program and program in PROGRAMS else "quinnflix"
     display_title = f"📢 {title.strip()}" if title and title.strip() else "📢 Announcement"
-    server_name = PROGRAMS[program]["name"] if program and program in PROGRAMS else "Quinnflix"
+    server_name = PROGRAMS[target_program]["name"]
     status_label = status if status in ANNOUNCEMENT_STATUSES else DEFAULT_ANNOUNCEMENT_STATUS
 
     # Create the announcement embed
@@ -556,11 +583,10 @@ async def announce(
         if not channel_id:
             continue
 
-        # If a program is specified, check if the server is subscribed to it.
-        if program:
-            subscribed_programs = settings.get("programs", list(PROGRAMS.keys()))
-            if program not in subscribed_programs:
-                continue
+        # Only send to servers subscribed to the target program.
+        subscribed_programs = settings.get("programs", list(DEFAULT_ENROLLED_PROGRAMS))
+        if target_program not in subscribed_programs:
+            continue
 
         try:
             guild = bot.get_guild(int(guild_id))
@@ -607,6 +633,7 @@ async def on_message(message: discord.Message):
             server_settings[guild_id] = {}
 
         server_settings[guild_id]["channel"] = message.channel.id
+        ensure_default_program_preferences(guild_id)
         save_settings(server_settings)
 
         # Send confirmation embed
