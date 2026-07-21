@@ -5,3 +5,4 @@ log/
 update_webhook.py
 staging/
 server_settings.json
+__pycache__/
