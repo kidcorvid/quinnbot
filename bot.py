@@ -60,6 +60,18 @@ PROGRAMS = {
 # default; everything else is explicit opt-in.
 DEFAULT_ENROLLED_PROGRAMS = ["quinnflix"]
 
+# Sentinel for /announce meaning "ignore subscriptions, send to everyone" -- used
+# for bot updates and network-wide status that affects every server regardless of
+# what they opted into.
+#
+# This deliberately does NOT live in PROGRAMS. That dict drives the /programs
+# toggle panel, /status, update_status_loop, and the welcome embed's server list,
+# so a "general" entry there would become a button people could opt out of (which
+# defeats the point) and a phantom service that /status reports as permanently
+# offline, since Uptime Kuma has no monitor by that name.
+GENERAL_ANNOUNCEMENT_KEY = "general"
+GENERAL_ANNOUNCEMENT_LABEL = "All Servers"
+
 # Uptime Kuma configuration from environment variables.
 UPTIME_KUMA_URL = os.getenv("UPTIME_KUMA_URL", "")
 UPTIME_KUMA_STATUS_PAGE_SLUG = os.getenv("UPTIME_KUMA_STATUS_PAGE_SLUG", "default")
@@ -130,7 +142,7 @@ def create_welcome_embed() -> discord.Embed:
     welcome_embed.add_field(
         name="🔧 How to Set Me Up",
         value=(
-            "1. An admin needs to run `!quinnbotsetup` in the channel you'd like to receive updates & announcements in.\n"
+            "1. **DO THIS FIRST:** An admin needs to run `!quinnbotsetup` in the channel you'd like to receive updates & announcements in.\n"
             "2. Admins can use `/programs` to select which updates you're interested in.\n"
             "3. Anyone can use `/status` to check the current status of all programs."
         ),
@@ -263,13 +275,91 @@ async def fetch_uptime_kuma_status() -> Optional[Dict[str, str]]:
 
 # --- UI COMPONENTS (for /programs command) ---
 
+# How long the /programs panel stays interactive. Discord measures this from the
+# LAST button press, not from when the panel opened, so someone actively toggling
+# never hits it -- only an abandoned panel expires.
+#
+# This must stay comfortably under 15 minutes. The panel is ephemeral, which means
+# the bot has no real message object and can only edit it through the interaction
+# token, and Discord kills that token 15 minutes after the command is invoked.
+# Raise this past ~13 minutes and on_timeout will fire into a dead token, fail,
+# and leave the panel looking permanently alive.
+PROGRAMS_PANEL_TIMEOUT = 300
+
+
+def build_programs_embed(guild_id: str, expired: bool = False) -> discord.Embed:
+    """Builds the /programs panel embed for a server's current preferences.
+
+    Rebuilt from scratch on every toggle so the embed body always agrees with the
+    button colours -- otherwise selection state is only legible to people who know
+    green means subscribed.
+    """
+    settings = server_settings.get(guild_id, {})
+    current_prefs = settings.get("programs", list(DEFAULT_ENROLLED_PROGRAMS))
+
+    subscribed = [
+        info for prog_id, info in PROGRAMS.items() if prog_id in current_prefs
+    ]
+    unsubscribed = [
+        info for prog_id, info in PROGRAMS.items() if prog_id not in current_prefs
+    ]
+
+    embed = discord.Embed(
+        title="📋 Program subscription" + (" · expired" if expired else ""),
+        description=(
+            "This panel timed out. Run `/programs` again to keep editing."
+            if expired
+            else "Toggle a button to subscribe or unsubscribe. Green means subscribed."
+        ),
+        color=discord.Color.light_grey() if expired else discord.Color.blue(),
+    )
+
+    embed.add_field(
+        name="Currently subscribed",
+        value="\n".join(f"{i['emoji']} **{i['name']}**" for i in subscribed)
+        or "*Nothing yet*",
+        inline=False,
+    )
+    embed.add_field(
+        name="Not subscribed",
+        value="\n".join(f"{i['emoji']} {i['name']}" for i in unsubscribed)
+        or "*Everything is switched on*",
+        inline=False,
+    )
+
+    # Toggling preferences does nothing visible until an announcement channel
+    # exists, so say so plainly rather than letting an admin walk away thinking
+    # they finished setting the bot up.
+    if not settings.get("channel"):
+        embed.add_field(
+            name="⚠️ No announcement channel set",
+            value=(
+                "Your choices are saved, but nothing will be delivered yet. "
+                "An admin needs to run `!quinnbotsetup` in the channel that "
+                "should receive announcements."
+            ),
+            inline=False,
+        )
+
+    if not expired:
+        embed.set_footer(
+            text=f"Expires after {PROGRAMS_PANEL_TIMEOUT // 60} minutes of inactivity"
+        )
+
+    return embed
+
 
 class ProgramSelectView(discord.ui.View):
     """A UI View that displays buttons for toggling program announcement preferences."""
 
     def __init__(self, guild_id: int):
-        super().__init__(timeout=300)  # View times out after 5 minutes of inactivity
+        super().__init__(timeout=PROGRAMS_PANEL_TIMEOUT)
         self.guild_id = str(guild_id)
+
+        # Set by the /programs command after responding. on_timeout needs a handle
+        # on the message to grey the panel out, and ctx.respond() doesn't return
+        # one for ephemeral responses.
+        self.message: Optional[discord.InteractionMessage] = None
 
         # Get the server's current preferences, defaulting to Quinnflix only if not set.
         current_prefs = server_settings.get(self.guild_id, {}).get(
@@ -278,19 +368,52 @@ class ProgramSelectView(discord.ui.View):
 
         # Dynamically create a button for each program
         for program_id, program_info in PROGRAMS.items():
-            is_selected = program_id in current_prefs
             button = discord.ui.Button(
                 label=f"{program_info['name']}",
                 emoji=program_info["emoji"],
-                style=(
-                    discord.ButtonStyle.success
-                    if is_selected
-                    else discord.ButtonStyle.secondary
-                ),
                 custom_id=f"prog_toggle_{program_id}",
             )
             button.callback = self.button_callback
             self.add_item(button)
+
+        self.refresh_buttons(current_prefs)
+
+    def refresh_buttons(self, current_prefs: List[str]) -> None:
+        """Repaints every button green or grey to match the saved preferences."""
+        for item in self.children:
+            if isinstance(item, discord.ui.Button):
+                item_prog_id = item.custom_id.replace("prog_toggle_", "")
+                item.style = (
+                    discord.ButtonStyle.success
+                    if item_prog_id in current_prefs
+                    else discord.ButtonStyle.secondary
+                )
+
+    async def on_timeout(self) -> None:
+        """Retires the panel once it has been idle for PROGRAMS_PANEL_TIMEOUT.
+
+        The buttons stop working the moment the view times out, so without this the
+        next click just returns Discord's generic 'This interaction failed'. Rather
+        than wiping the panel, we disable it in place and keep the subscription list
+        visible, so an abandoned panel is still a readable record of what was chosen.
+        """
+        for item in self.children:
+            if isinstance(item, discord.ui.Button):
+                item.disabled = True
+                item.style = discord.ButtonStyle.secondary
+
+        if self.message is None:
+            return
+
+        try:
+            await self.message.edit(
+                embed=build_programs_embed(self.guild_id, expired=True), view=self
+            )
+        except discord.HTTPException:
+            # The person dismissed the ephemeral panel themselves, or the
+            # interaction token expired. Either way there is nothing left to
+            # update and nothing worth logging loudly.
+            pass
 
     async def button_callback(self, interaction: discord.Interaction):
         """This callback handles all button presses in this view."""
@@ -322,16 +445,14 @@ class ProgramSelectView(discord.ui.View):
         save_settings(server_settings)
 
         # Update the button styles to reflect the new selection
-        for item in self.children:
-            if isinstance(item, discord.ui.Button):
-                item_prog_id = item.custom_id.replace("prog_toggle_", "")
-                if item_prog_id in current_prefs:
-                    item.style = discord.ButtonStyle.success
-                else:
-                    item.style = discord.ButtonStyle.secondary
+        self.refresh_buttons(current_prefs)
 
-        # Edit the original message to show the updated view
-        await interaction.response.edit_message(view=self)
+        # Send the embed as well as the view, so the written summary stays in step
+        # with the button colours instead of being frozen at whatever it said when
+        # the panel first opened.
+        await interaction.response.edit_message(
+            embed=build_programs_embed(self.guild_id), view=self
+        )
 
 
 # --- BOT EVENTS ---
@@ -497,13 +618,13 @@ async def programs(ctx: discord.ApplicationContext):
         )
         return
 
-    embed = discord.Embed(
-        title="📋 Program Subscription",
-        description="Click the buttons below to toggle announcements for each program.\nGreen means you are subscribed.",
-        color=discord.Color.blue(),
-    )
+    guild_id = str(ctx.guild.id)
     view = ProgramSelectView(ctx.guild.id)
-    await ctx.respond(embed=embed, view=view, ephemeral=True)
+    await ctx.respond(embed=build_programs_embed(guild_id), view=view, ephemeral=True)
+
+    # ctx.respond() doesn't hand back the message for an ephemeral reply, so fetch
+    # the handle separately. on_timeout needs it to grey the panel out later.
+    view.message = await ctx.interaction.original_response()
 
 
 # --- SLASH COMMANDS (for owner) ---
@@ -525,8 +646,8 @@ async def programs(ctx: discord.ApplicationContext):
         discord.Option(
             str,
             name="program",
-            description="Optional: Announce for a specific program (fills the Server field)",
-            choices=list(PROGRAMS.keys()),
+            description="Optional: Program to announce for, or 'general' to reach every server",
+            choices=[GENERAL_ANNOUNCEMENT_KEY] + list(PROGRAMS.keys()),
             required=False,
         ),
         discord.Option(
@@ -553,11 +674,21 @@ async def announce(
     await ctx.defer(ephemeral=True)
 
     # Resolve title, target program, server name, and status/color for the embed.
-    # An unspecified program defaults to Quinnflix (every server has it), so
-    # subscription filtering below is always evaluated against a real program.
-    target_program = program if program and program in PROGRAMS else "quinnflix"
+    #
+    # target_program is None for a general announcement, which is the signal the
+    # delivery loop below uses to skip subscription filtering entirely. Anything
+    # else resolves to a real program key; an unspecified program still defaults
+    # to Quinnflix (every server has it), so filtering is always evaluated
+    # against something real.
+    is_general = program == GENERAL_ANNOUNCEMENT_KEY
+    if is_general:
+        target_program = None
+        server_name = GENERAL_ANNOUNCEMENT_LABEL
+    else:
+        target_program = program if program and program in PROGRAMS else "quinnflix"
+        server_name = PROGRAMS[target_program]["name"]
+
     display_title = f"📢 {title.strip()}" if title and title.strip() else "📢 Announcement"
-    server_name = PROGRAMS[target_program]["name"]
     status_label = status if status in ANNOUNCEMENT_STATUSES else DEFAULT_ANNOUNCEMENT_STATUS
 
     # Create the announcement embed
@@ -583,10 +714,15 @@ async def announce(
         if not channel_id:
             continue
 
-        # Only send to servers subscribed to the target program.
-        subscribed_programs = settings.get("programs", list(DEFAULT_ENROLLED_PROGRAMS))
-        if target_program not in subscribed_programs:
-            continue
+        # Only send to servers subscribed to the target program. A general
+        # announcement has no target program and deliberately ignores this,
+        # reaching every server that has an announcement channel set.
+        if target_program is not None:
+            subscribed_programs = settings.get(
+                "programs", list(DEFAULT_ENROLLED_PROGRAMS)
+            )
+            if target_program not in subscribed_programs:
+                continue
 
         try:
             guild = bot.get_guild(int(guild_id))
@@ -603,9 +739,16 @@ async def announce(
             print(f"Failed to send announcement to guild {guild_id}: {e}")
             failed_count += 1
 
-    await ctx.followup.send(
-        f"✅ Announcement sent to {sent_count} servers. ({failed_count} failures.)"
-    )
+    # Name the scope explicitly so a broadcast is never mistaken for a filtered
+    # send that happened to reach a lot of servers.
+    if is_general:
+        summary = f"✅ Announcement broadcast to all {sent_count} configured servers."
+    else:
+        summary = (
+            f"✅ Announcement sent to {sent_count} servers subscribed to {server_name}."
+        )
+
+    await ctx.followup.send(f"{summary} ({failed_count} failures.)")
 
 
 # --- TEXT-BASED COMMANDS (for owner convenience and admin setup) ---
