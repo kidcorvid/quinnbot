@@ -657,6 +657,12 @@ async def programs(ctx: discord.ApplicationContext):
             choices=list(ANNOUNCEMENT_STATUSES.keys()),
             required=False,
         ),
+        discord.Option(
+            str,
+            name="image_url",
+            description="Optional: Direct link to an image shown below the message",
+            required=False,
+        ),
     ],
 )
 async def announce(
@@ -665,10 +671,20 @@ async def announce(
     title: str = None,
     program: str = None,
     status: str = None,
+    image_url: str = None,
 ):
     """Sends an announcement to all servers that have set up an announcement channel."""
     if ctx.author.id != OWNER_ID:
         await ctx.respond("❌ This is a Quinn-only command.", ephemeral=True)
+        return
+
+    # Discord only accepts http(s) image links. Catching a bad link here gives a
+    # clear error up front, instead of every server's send failing one by one.
+    image_url = image_url.strip() if image_url and image_url.strip() else None
+    if image_url and not image_url.lower().startswith(("http://", "https://")):
+        await ctx.respond(
+            "❌ `image_url` must start with `http://` or `https://`.", ephemeral=True
+        )
         return
 
     await ctx.defer(ephemeral=True)
@@ -703,8 +719,17 @@ async def announce(
         url=ANNOUNCEMENT_AUTHOR_URL,
         icon_url=ANNOUNCEMENT_AUTHOR_ICON_URL,
     )
-    announcement_embed.add_field(name="Server:", value=server_name, inline=True)
-    announcement_embed.set_footer(text=f"Status: {status_label}")
+    if image_url:
+        # Discord always draws an embed's image *below* its fields, so a
+        # "Server:" field would push the image under it. With an image, fold the
+        # server name into the footer instead: text -> image -> footer.
+        announcement_embed.set_image(url=image_url)
+        announcement_embed.set_footer(
+            text=f"Server: {server_name} • Status: {status_label}"
+        )
+    else:
+        announcement_embed.add_field(name="Server:", value=server_name, inline=True)
+        announcement_embed.set_footer(text=f"Status: {status_label}")
 
     sent_count = 0
     failed_count = 0
